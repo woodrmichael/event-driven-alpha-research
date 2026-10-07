@@ -1,0 +1,198 @@
+schema_version: 1
+run_id: final_ranking_increment_marketdata_20260809_v1
+frozen_at: "2026-08-09T00:00:00-05:00"
+starting_commit: a154f7e
+status: frozen_before_corrected_expanded_marketdata_model_results
+
+correction:
+  reason: >-
+    The owner's intended newer-options comparison was the later expanded local
+    MarketData pull, not additional Databento quote rows. The earlier run is
+    retained as an audit trail and is not overwritten.
+  prior_run: final_ranking_increment_20260806_v1
+  primary_change_only: >-
+    Replace the Week 7 MarketData options block with the later expanded
+    MarketData options block; retain the prediction target, folds, purge,
+    estimators, metrics, inference family, thresholds, and seeds.
+
+research_question:
+  null: >-
+    Structured event information and headline text add no incremental
+    out-of-sample realized-variance ranking value after conditioning on the
+    expanded point-in-time MarketData options, market, reaction, and macro
+    context.
+  primary_estimand: >-
+    Paired pooled OOF Spearman delta, F_full_event minus
+    C_strong_market_options, on identical complete-case rows and folds.
+  interpretation_scope: predictive_ranking_not_tradability
+
+timing:
+  primary_variant:
+    name: delayed_20m
+    prediction_timestamp: event_timestamp_utc
+    decision_timestamp: event_timestamp_utc + 20 minutes
+    feature_cutoff: decision_timestamp
+  sensitivity_variant:
+    name: pre_event_only
+    decision_timestamp: event_timestamp_utc
+    feature_cutoff: event_timestamp_utc
+  label:
+    name: realized_variance
+    operational_window_start: strictly after decision_timestamp
+    operational_window_end: event_timestamp_utc + 1440 wall-clock minutes
+    minimum_post_bars: 12
+    target_transform: natural_log_clip_lower_1e-10
+
+universe:
+  eligible_event_rules:
+    - stable event ID, ticker, and event timestamp are non-null
+    - future realized variance is locally reconstructable
+    - option and SEC features satisfy the frozen cutoff
+    - sealed v2, v3, and v4 tradability holdouts are never read
+  primary_cohort:
+    name: complete_case_common
+    primary_options_candidate: marketdata_7_30_20260718
+    rule: >-
+      Intersection with valid labels, lagged market state, decision-time
+      reaction, macro context, and point-in-time-valid later expanded
+      MarketData option features.
+    frozen_coverage_basis: >-
+      The already-completed audit recorded 266724 point-in-time-valid labeled
+      events and 134584 otherwise-common events for the expanded pull versus
+      190296 and 86648 for Week 7.
+  secondary_cohort:
+    name: broad_left_joined
+    missingness_flags: explicit
+  robustness_cohorts:
+    - exact_databento_subset
+    - exact_or_high_confidence_timestamps
+    - identity_redacted
+    - headline_shuffled
+  out_of_time_2026_status: retrospective_out_of_time_not_sealed
+
+splits:
+  type: five_fold_expanding_walk_forward
+  folds: 5
+  ordering: event_timestamp_utc_then_event_id
+  initial_training_fraction: 0.35
+  embargo_trading_days: 2
+  duplicate_cluster_purge_keys:
+    - headline_cluster_key
+    - ticker_headline_cluster_key
+    - event_duplicate_key
+  hard_temporal_gate: max_training_timestamp < min_validation_timestamp
+  preprocessing_scope: outer_training_only
+
+common_controls:
+  - ticker
+  - event_hour_utc
+  - event_day_of_week
+  - event_month
+  - event_year
+  - trading_session_bucket
+
+feature_variants:
+  A_lagged_market: lagged market state and common controls
+  B_decision_market: A plus stock, SPY, sector, and volume reaction by +20m
+  C_strong_market_options: B plus expanded point-in-time MarketData options and macro
+  D_strong_market_options_plus_structured_event: C plus source, route, taxonomy, timestamp quality, and cutoff-safe SEC
+  E_strong_market_options_plus_headline: C plus train-only TF-IDF headline text
+  F_full_event: C plus structured event information and headline text
+
+estimators:
+  primary:
+    name: matched_ridge_tfidf
+    target: log_realized_variance
+    numeric_pipeline: train-only median imputer and StandardScaler without centering
+    categorical_pipeline: train-only UNKNOWN imputer and one-hot encoder
+    headline:
+      representation: TfidfVectorizer
+      ngram_range: [1, 2]
+      minimum_document_frequency: 5
+      maximum_features: 60000
+      sublinear_tf: true
+    model:
+      class: Ridge
+      alpha: 5.0
+      solver: lsqr
+      tolerance: 0.0001
+  continuity:
+    name: legacy_hgb_numeric
+    max_iter: 250
+    learning_rate: 0.04
+    l2_regularization: 0.05
+    min_samples_leaf: 40
+    random_state: 7
+  cross_fitted_incremental:
+    name: outer_safe_hgb_score_plus_event_ridge
+    inner_folds: 4
+    same_embargo_and_duplicate_purge: true
+
+metrics:
+  primary: pooled_and_fold_oof_spearman
+  primary_comparison: F_full_event_minus_C_strong_market_options
+  secondary:
+    - QLIKE
+    - training_fold_q95_precision_lift_capture
+    - top250_realized_variance_lift
+    - score_decile_calibration
+    - fold_year_stability
+    - concentration
+  primary_alert_rate: 0.02
+  alert_rate_sensitivities: [0.005, 0.01, 0.05]
+
+inference:
+  comparisons_frozen_for_multiplicity:
+    - D_minus_C
+    - E_minus_C
+    - F_minus_C
+  ticker_cluster_bootstrap:
+    resamples: 10000
+  calendar_month_cluster_bootstrap:
+    resamples: 10000
+  paired_randomization:
+    resamples: 10000
+  absolute_label_permutation_secondary:
+    resamples: 10000
+  multiplicity:
+    method: Holm
+    alpha: 0.05
+
+claim_decision:
+  allowed_statuses:
+    - event_increment_supported
+    - event_increment_not_established
+    - event_increment_negative
+    - insufficient_or_invalid_evidence
+  supported_requires_all:
+    - primary delta positive
+    - Holm-adjusted p below 0.05
+    - ticker and month 95% intervals exclude zero positively
+    - at least four of five fold deltas positive
+    - all validity and concentration gates pass
+  queue_lift_cannot_override_primary_failure: true
+
+seeds:
+  primary_model: 20260807
+  hgb: 7
+  ticker_bootstrap: 20260809
+  month_bootstrap: 20260810
+  paired_randomization: 20260811
+  absolute_permutation: 20260812
+  headline_shuffle: 20260813
+
+output_contract:
+  overwrite_existing_run_artifacts: false
+  output_dir: outputs/final_ranking_increment_marketdata_20260809_v1
+  report_dir: reports/final_ranking_increment_marketdata_20260809_v1
+  log_dir: logs/final_ranking_increment_marketdata_20260809_v1
+  meeting_notebook: meeting_walkthrough.ipynb
+  meeting_brief: MEETING_BRIEF.md
+
+safety:
+  network_collection: prohibited
+  paid_requests: prohibited
+  orders: prohibited
+  sealed_holdout_access: prohibited
+  threshold_or_model_tuning_after_results: prohibited
+  raw_option_rows_as_event_coverage: prohibited
